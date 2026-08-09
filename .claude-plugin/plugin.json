@@ -1,5 +1,12 @@
 {
   "name": "codex-subagent",
   "version": "0.1.0",
-  "description": "Run OpenAI Codex (GPT models) as a subagent via the codex app-server JSON-RPC interface. Adds a CodexAgent MCP tool and a codex-runner relay agent for workflow steps."
+  "description": "Run OpenAI Codex (GPT models) as a subagent via the codex app-server JSON-RPC interface. Adds a CodexAgent MCP tool and a codex-runner relay agent for workflow steps.",
+  "mcpServers": {
+    "codex": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/index.mjs"],
+      "timeout": 1800000
+    }
+  }
 }

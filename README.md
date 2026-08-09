@@ -52,7 +52,13 @@ never blocks waiting for a human, and anything the sandbox would prompt for
 is auto-denied.
 
 Results are middle-truncated at ~150k chars. The MCP timeout is 30 min
-(`.mcp.json`); Claude Code auto-backgrounds tool calls that run past 2 min.
+(`mcpServers` in `.claude-plugin/plugin.json`); Claude Code auto-backgrounds
+tool calls that run past 2 min.
+
+The MCP server is declared inline in `plugin.json`, not in a root `.mcp.json` —
+a root `.mcp.json` would also be picked up as *project* MCP config when running
+Claude Code inside this repo, producing a broken duplicate server
+(`${CLAUDE_PLUGIN_ROOT}` is only substituted for plugins).
 
 Set `CODEX_EXECUTABLE` to override native-binary resolution (the npm shims
 break piped stdio on Windows, so the server spawns the vendor exe directly).
