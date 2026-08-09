@@ -121,7 +121,10 @@ async function codexAgent(codex, args, track) {
     formatUsage(result.usage),
   ].join("\n");
 
+  // Claude Code renders structuredContent INSTEAD of the text content block
+  // when both are present, so the agent's message must live here too.
   const structured = {
+    text: truncateMiddle(result.text),
     threadId: result.threadId,
     status: result.status,
     model: result.model,
