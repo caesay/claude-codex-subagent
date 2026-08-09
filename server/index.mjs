@@ -51,11 +51,14 @@ mcp.onNotification("notifications/cancelled", (params) => {
   }
 });
 
-process.stdin.on("end", () => {
+function shutdown() {
   codex.shutdown();
   process.exit(0);
-});
-process.stdin.on("close", () => {
-  codex.shutdown();
-  process.exit(0);
-});
+}
+process.stdin.on("end", shutdown);
+process.stdin.on("close", shutdown);
+// Codex app-server does not exit on stdin EOF alone, so a hard-killed parent
+// orphans it. Catch what signals we can (POSIX; Windows kills are unhookable).
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+process.on("SIGHUP", shutdown);
