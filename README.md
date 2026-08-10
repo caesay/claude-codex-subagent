@@ -1,24 +1,41 @@
 # codex-subagent
 
-Claude Code plugin that runs OpenAI Codex (GPT models) as a subagent through
-the `codex app-server` JSON-RPC interface. Zero dependencies, no build step —
-plain Node ESM.
+Claude Code plugin that runs OpenAI Codex (GPT models) as a subagent via the
+`codex exec` CLI, supervised by a small watchdog runner. Zero dependencies,
+no build step, no daemon.
 
 ## What you get
 
-- **`CodexAgent` MCP tool** — launch a task on a Codex model
-  (`gpt-5.6-sol`, `gpt-5.6-terra`, ...), pick reasoning effort, sandbox, and
-  working directory; continue conversations across calls via `threadId`.
-- **`CodexStatus` MCP tool** — auth status, model list, server health.
-- **`codex-runner` agent** — thin relay so Workflow (ultracode) steps can be
-  assigned to Codex models.
-- **`codex-workflows` skill** — canonical usage patterns.
+- **`codex` skill** — the full procedure for launching a Codex agent from any
+  context (main conversation, subagent, workflow step): model/effort/sandbox
+  selection, thread resume, hang-proof waiting, and a mandatory report-back
+  contract.
+- **`run-codex.mjs` watchdog** — one short-lived process per call. Enforces a
+  wall-clock ceiling and stall detection (tree-kill), captures the thread id,
+  and always writes `result.json`. Exit 0 only when Codex exited 0 AND
+  produced a non-empty final message.
+- **`codex-runner` agent** — thin Sonnet relay so Workflow (ultracode) steps
+  can be assigned to Codex models.
+
+## Why this shape
+
+OpenAI's own `codex-plugin-cc` accumulated 30+ open hang/no-result issues.
+The recurring causes, which this design counters directly:
+
+| Failure there | Counter here |
+|---|---|
+| Relay returns "running in background..." stub, result never collected | Hard rule: never finalize before reading `result.json`; harness-tracked background only |
+| Completion promise never bounded; jobs wedge at `running` forever | Watchdog wall-clock ceiling + stall kill, always-written `result.json` |
+| Detached workers tree-killed or orphaned by the harness | No detaching, ever; one foreground/tracked process per call |
+| `exit 0` treated as success with zero output | Empty final message = error, loud `CODEX-ERROR:` contract |
+| Stale shared broker / app-server reused while wedged | No daemon at all |
+| Inherited user MCP servers hang startup | `--ignore-user-config` |
 
 ## Prerequisites
 
 - Node.js ≥ 18
 - `npm install -g @openai/codex` (tested against codex-cli 0.144.5)
-- `codex login` (auth is reused from `~/.codex/auth.json`)
+- `codex login`
 
 ## Install
 
@@ -26,44 +43,10 @@ plain Node ESM.
 claude --plugin-dir C:\Source\claude-codex-subagent
 ```
 
-or add the directory as a local marketplace. Verify with `/mcp` — a `codex`
-server with 2 tools should be listed. Full tool names:
+## Use
 
-- `mcp__plugin_codex-subagent_codex__CodexAgent`
-- `mcp__plugin_codex-subagent_codex__CodexStatus`
-
-## CodexAgent parameters
-
-| Param | Type | Notes |
-|---|---|---|
-| `prompt` | string, required | Self-contained task brief |
-| `model` | string | See CodexStatus; omit for default |
-| `effort` | enum | `low\|medium\|high\|xhigh\|max\|ultra` (`ultra` model-dependent) |
-| `instructions` | string | Developer instructions; new threads only |
-| `cwd` | string | Working directory; defaults to project dir |
-| `sandbox` | enum | `read-only` / `workspace-write` (default) / `danger-full-access` |
-| `ephemeral` | boolean | Don't persist the thread (default false) |
-| `threadId` | string | Resume a prior thread from the `---codex---` footer |
-
-Sandbox semantics: `workspace-write` lets the agent edit files under `cwd`
-with network off; `read-only` blocks all writes; `danger-full-access`
-disables the sandbox entirely. Approvals are hard-set to `never` — Codex
-never blocks waiting for a human, and anything the sandbox would prompt for
-is auto-denied.
-
-Results are middle-truncated at ~150k chars. The MCP timeout is 30 min
-(`mcpServers` in `.claude-plugin/plugin.json`); Claude Code auto-backgrounds
-tool calls that run past 2 min.
-
-The MCP server is declared inline in `plugin.json`, not in a root `.mcp.json` —
-a root `.mcp.json` would also be picked up as *project* MCP config when running
-Claude Code inside this repo, producing a broken duplicate server
-(`${CLAUDE_PLUGIN_ROOT}` is only substituted for plugins).
-
-Set `CODEX_EXECUTABLE` to override native-binary resolution (the npm shims
-break piped stdio on Windows, so the server spawns the vendor exe directly).
-
-## Workflow (ultracode) steps on Codex
+Direct (main conversation): invoke the `codex-subagent:codex` skill and follow
+it. Workflow step / subagent:
 
 ```js
 const result = await agent(
@@ -74,24 +57,31 @@ const result = await agent(
 // pass 'codex-thread: <id>' as a header in the next step
 ```
 
-See `skills/codex-workflows/SKILL.md` for the full pattern.
+Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-sandbox:`,
+`codex-cwd:`, `codex-ceiling-min:`.
+
+Results end with a grep-able footer:
+
+```
+---codex---
+threadId: 019876ab-...
+model: gpt-5.6-terra  effort: high  sandbox: read-only
+duration: 184032 ms
+```
+
+Failures are always reported as `CODEX-ERROR: <reason>` with the threadId for
+resume — never silence.
+
+## CLI notes
+
+- The watchdog spawns the native codex binary directly (npm shims are
+  unreliable with piped stdio on Windows); override with `CODEX_EXECUTABLE`.
+- Prompts are piped via stdin (`-`), never inlined as shell arguments.
+- `codex exec resume <threadId>` accepts no `-s`/`-C`; sandbox on resume goes
+  via `-c sandbox_mode="..."`.
 
 ## Test
 
 ```
-node test/smoke.mjs            # full: handshake, tools, live Codex turn
-node test/smoke.mjs --no-turn  # skip the live turn (no tokens spent)
+node test/smoke.mjs   # happy path, thread resume, ceiling kill (few tokens)
 ```
-
-## Architecture
-
-```
-Claude Code ── MCP (JSONL JSON-RPC, stdio) ── server/index.mjs
-                                                │  one persistent child
-                                                ▼
-                                          codex app-server (JSONL JSON-RPC, stdio)
-```
-
-One `codex app-server` child is spawned lazily on first tool call and shared
-across the session; threads/turns are multiplexed over it. If it crashes, the
-next call respawns it and non-ephemeral threads resume via `threadId`.

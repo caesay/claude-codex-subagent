@@ -1,119 +1,77 @@
-// Smoke test: drives server/index.mjs over raw JSONL stdio, no Claude needed.
-// Usage: node test/smoke.mjs [--no-turn]   (--no-turn skips the live CodexAgent call)
+// Smoke test for the watchdog runner. Drives skills/codex/run-codex.mjs
+// directly — no Claude needed. Spends a few Codex tokens (two tiny turns).
+// Usage: node test/smoke.mjs
 
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync, readFileSync, mkdtempSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const skipTurn = process.argv.includes("--no-turn");
-
-const child = spawn(process.execPath, [join(root, "server", "index.mjs")], {
-  stdio: ["pipe", "pipe", "inherit"],
-});
-
-const pending = new Map();
-let nextId = 1;
-
-const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-rl.on("line", (line) => {
-  if (!line.trim()) return;
-  let msg;
-  try {
-    msg = JSON.parse(line);
-  } catch {
-    console.error("non-JSON line from server:", line.slice(0, 200));
-    return;
-  }
-  if (msg.id !== undefined && pending.has(msg.id)) {
-    const { resolve, reject } = pending.get(msg.id);
-    pending.delete(msg.id);
-    if (msg.error) reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-    else resolve(msg.result);
-  }
-});
-
-function request(method, params, timeoutMs = 30_000) {
-  const id = nextId++;
-  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`timeout waiting for ${method} (${timeoutMs}ms)`));
-    }, timeoutMs);
-    pending.set(id, {
-      resolve: (v) => { clearTimeout(t); resolve(v); },
-      reject: (e) => { clearTimeout(t); reject(e); },
-    });
-  });
-}
-
-function notify(method, params) {
-  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n");
-}
+const runner = join(root, "skills", "codex", "run-codex.mjs");
+const base = mkdtempSync(join(tmpdir(), "codex-smoke-"));
 
 function assert(cond, label) {
-  if (!cond) throw new Error(`ASSERT FAILED: ${label}`);
+  if (!cond) {
+    console.error(`ASSERT FAILED: ${label}`);
+    process.exit(1);
+  }
   console.log(`ok: ${label}`);
 }
 
-try {
-  const init = await request("initialize", {
-    protocolVersion: "2024-11-05",
-    clientInfo: { name: "smoke", version: "0.0.1" },
-    capabilities: {},
-  });
-  assert(init.serverInfo?.name === "codex-subagent", "initialize returns serverInfo");
-  assert(init.protocolVersion === "2024-11-05", "initialize echoes protocolVersion");
-  notify("notifications/initialized");
-
-  const tools = await request("tools/list", {});
-  assert(tools.tools?.length === 2, "tools/list returns 2 tools");
-  assert(
-    tools.tools.map((t) => t.name).sort().join(",") === "CodexAgent,CodexStatus",
-    "tool names are CodexAgent, CodexStatus"
+function run(name, prompt, ceilingMin, extraArgs) {
+  const out = join(base, name);
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, "prompt.md"), prompt);
+  const res = spawnSync(
+    process.execPath,
+    [
+      runner, "--out", out, "--prompt-file", join(out, "prompt.md"),
+      "--ceiling-min", String(ceilingMin), "--",
+      "exec", ...extraArgs,
+      "-s", "read-only", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
+      "--skip-git-repo-check", "--ignore-user-config", "-C", root, "-",
+    ],
+    { encoding: "utf8", timeout: 240_000 }
   );
-
-  const status = await request("tools/call", { name: "CodexStatus", arguments: {} }, 60_000);
-  assert(!status.isError, "CodexStatus succeeds");
-  const s = status.structuredContent;
-  assert(s?.exePath, "CodexStatus reports exe path");
-  assert(Array.isArray(s?.models) && s.models.length > 0, "CodexStatus reports models");
-  assert(s?.serverRunning === true, "app-server child is running");
-  console.log("  default model:", s.models.find((m) => m.isDefault)?.id);
-  console.log("  auth:", JSON.stringify(s.auth).slice(0, 200));
-
-  if (!skipTurn) {
-    console.log("running CodexAgent turn (may take a minute)...");
-    const agent = await request(
-      "tools/call",
-      {
-        name: "CodexAgent",
-        arguments: {
-          prompt: "Reply with exactly: PONG",
-          sandbox: "read-only",
-          effort: "low",
-          ephemeral: true,
-          cwd: root,
-        },
-      },
-      300_000
-    );
-    assert(!agent.isError, "CodexAgent succeeds");
-    const text = agent.content?.[0]?.text ?? "";
-    assert(text.includes("PONG"), "CodexAgent output contains PONG");
-    assert(text.includes("---codex---"), "result has ---codex--- footer");
-    assert(/threadId: \S+/.test(text), "footer has threadId");
-    assert(agent.structuredContent?.status === "completed", "structuredContent status completed");
-    console.log("  turn result:\n" + text.split("\n").map((l) => "    " + l).join("\n"));
-  }
-
-  console.log("\nSMOKE PASS");
-  child.kill();
-  process.exit(0);
-} catch (err) {
-  console.error("\nSMOKE FAIL:", err.message);
-  child.kill();
-  process.exit(1);
+  const result = JSON.parse(readFileSync(join(out, "result.json"), "utf8"));
+  return { res, result };
 }
+
+// 1. Happy path: completes, non-empty message, threadId captured, exit 0.
+const happy = run("happy", "Reply with exactly: SMOKE-OK", 5, []);
+assert(happy.res.status === 0, "happy path exits 0");
+assert(happy.result.ok === true, "result.ok true");
+assert(happy.result.lastMessage === "SMOKE-OK", "lastMessage is SMOKE-OK");
+assert(/^[0-9a-f-]{36}$/.test(happy.result.threadId), "threadId captured");
+assert(happy.res.stdout.includes("RESULT: "), "RESULT line on stdout");
+
+// 2. Resume: same thread remembers context. (resume takes no -s/-C)
+const out2 = join(base, "resume");
+mkdirSync(out2, { recursive: true });
+writeFileSync(join(out2, "prompt.md"), "Repeat your previous reply and append: TWICE");
+const res2 = spawnSync(
+  process.execPath,
+  [
+    runner, "--out", out2, "--prompt-file", join(out2, "prompt.md"),
+    "--ceiling-min", "5", "--",
+    "exec", "resume", happy.result.threadId,
+    "-c", 'sandbox_mode="read-only"', "-c", "model_reasoning_effort=low",
+    "--skip-git-repo-check", "--ignore-user-config", "-",
+  ],
+  { encoding: "utf8", timeout: 240_000 }
+);
+const result2 = JSON.parse(readFileSync(join(out2, "result.json"), "utf8"));
+assert(res2.status === 0, "resume exits 0");
+assert(/SMOKE-OK/.test(result2.lastMessage), "resume remembers context");
+assert(result2.threadId === happy.result.threadId, "resume keeps threadId");
+
+// 3. Ceiling kill: tiny ceiling, expect killed + nonzero exit + result.json intact.
+const killed = run("killed", "Count from 1 to 100 slowly, one line each.", 0.02, []);
+assert(killed.res.status !== 0, "ceiling kill exits nonzero");
+assert(killed.result.ok === false, "killed result.ok false");
+assert(killed.result.killed === true, "killed flag set");
+assert(/ceiling/.test(killed.result.reason), "reason mentions ceiling");
+
+console.log("\nSMOKE PASS");
