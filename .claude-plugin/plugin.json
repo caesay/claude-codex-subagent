@@ -1,5 +1,12 @@
 {
   "name": "codex-subagent",
   "version": "0.2.0",
-  "description": "Run OpenAI Codex (GPT models) as a subagent via the codex CLI with a watchdog runner. Adds a codex skill and a codex-runner relay agent for workflow steps."
+  "description": "Run OpenAI Codex (GPT models) as a subagent via the codex CLI with a watchdog runner. Adds a codex skill and a codex-runner relay agent for workflow steps.",
+  "author": {
+    "name": "Caelan Sayler",
+    "url": "https://github.com/caesay"
+  },
+  "homepage": "https://github.com/caesay/claude-codex-subagent",
+  "repository": "https://github.com/caesay/claude-codex-subagent",
+  "keywords": ["codex", "openai", "gpt", "subagent", "delegation", "workflow"]
 }

@@ -1,0 +1,25 @@
+{
+  "name": "caesay",
+  "description": "Plugins by caesay",
+  "owner": {
+    "name": "Caelan Sayler",
+    "url": "https://github.com/caesay"
+  },
+  "plugins": [
+    {
+      "name": "codex-subagent",
+      "displayName": "Codex Subagent",
+      "source": "./",
+      "version": "0.2.0",
+      "description": "Run OpenAI Codex (GPT models) as a subagent via the codex CLI, with a watchdog that enforces timeouts and guarantees a result is always reported.",
+      "author": {
+        "name": "Caelan Sayler",
+        "url": "https://github.com/caesay"
+      },
+      "homepage": "https://github.com/caesay/claude-codex-subagent",
+      "repository": "https://github.com/caesay/claude-codex-subagent",
+      "keywords": ["codex", "openai", "gpt", "subagent", "delegation", "workflow"],
+      "category": "agents"
+    }
+  ]
+}

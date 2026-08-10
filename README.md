@@ -43,7 +43,33 @@ The recurring causes, which this design counters directly:
 ## Install
 
 ```
-claude --plugin-dir C:\Source\claude-codex-subagent
+/plugin marketplace add caesay/claude-codex-subagent
+/plugin install codex-subagent@caesay
+```
+
+Then restart Claude Code so the skill and agent load.
+
+Non-interactively:
+
+```
+claude plugin install codex-subagent@caesay --scope user
+```
+
+Or enable it per project in `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "caesay": { "source": { "source": "github", "repo": "caesay/claude-codex-subagent" } }
+  },
+  "enabledPlugins": { "codex-subagent@caesay": true }
+}
+```
+
+For local development of this plugin, load the working tree directly instead:
+
+```
+claude --plugin-dir /path/to/claude-codex-subagent
 ```
 
 ## Use
