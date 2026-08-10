@@ -92,8 +92,10 @@ Hard rules, each one a known failure mode of naive integrations:
 - NEVER end your final turn before reading `result.json`. A "Codex was
   started..." message is not a result.
 - NEVER return nothing on failure — always the `CODEX-ERROR:` form.
-- To cancel, kill the `node run-codex.mjs` process — the codex tree dies with
-  it. Report the interruption + threadId.
+- To cancel, send SIGTERM/SIGINT to the `node run-codex.mjs` process (on
+  Windows use `taskkill /PID <pid> /T`, not `Stop-Process -Force`, so the
+  runner can clean up). It kills the codex tree and still writes
+  `result.json`. Report the interruption + threadId.
 
 ## Use from workflows and subagents
 

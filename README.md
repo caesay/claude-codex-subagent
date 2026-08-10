@@ -11,9 +11,12 @@ no build step, no daemon.
   selection, thread resume, hang-proof waiting, and a mandatory report-back
   contract.
 - **`run-codex.mjs` watchdog** — one short-lived process per call. Enforces a
-  wall-clock ceiling and stall detection (tree-kill), captures the thread id,
-  and always writes `result.json`. Exit 0 only when Codex exited 0 AND
-  produced a non-empty final message.
+  wall-clock ceiling and stall detection (process-tree kill: `taskkill /T` on
+  Windows, process-group SIGKILL on POSIX), captures the thread id, and
+  *always* writes `result.json` — including argument errors, spawn failures,
+  stream errors, and SIGINT/SIGTERM. Exit 0 only when Codex exited 0 AND this
+  run wrote a non-empty final message (a stale message from a previous run in
+  the same output directory cannot count).
 - **`codex-runner` agent** — thin Sonnet relay so Workflow (ultracode) steps
   can be assigned to Codex models.
 
@@ -83,5 +86,11 @@ resume — never silence.
 ## Test
 
 ```
-node test/smoke.mjs   # happy path, thread resume, ceiling kill (few tokens)
+node test/smoke.mjs             # contract tests + live turns (few tokens)
+node test/smoke.mjs --offline   # contract tests only, no Codex calls
 ```
+
+Covered: argument errors still write `result.json`; banned caller flags;
+invalid timer values; unreadable prompt file; stale final message cannot fake
+success; happy path; thread resume with context; ceiling kill preserving the
+threadId.

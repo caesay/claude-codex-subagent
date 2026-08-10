@@ -5,10 +5,10 @@
 //   node run-codex.mjs --out <dir> --prompt-file <file> [--ceiling-min 30] [--stall-min 10] -- <codex exec args...>
 //
 // The runner owns all output paths under --out:
-//   events.jsonl   JSONL event stream (--json)
-//   stderr.txt     codex stderr
+//   events.jsonl      JSONL event stream (--json)
+//   stderr.txt        codex stderr
 //   last-message.txt  final agent message (-o)
-//   result.json    {ok, exitCode, killed, reason, threadId, durationMs, lastMessage}
+//   result.json       {ok, exitCode, killed, reason, threadId, durationMs, lastMessage}
 //
 // The prompt is delivered via stdin (codex arg `-`), so arbitrary content needs
 // no shell quoting. The codex args after `--` must NOT include --json, -o, or a
@@ -17,26 +17,29 @@
 //   exec resume <threadId> -c sandbox_mode="read-only" -
 //
 // Guarantees (the reasons this script exists):
-//   - Wall-clock ceiling: the codex process is tree-killed after --ceiling-min.
-//   - Stall detection: tree-killed after --stall-min with no stdout/stderr output.
-//   - result.json is ALWAYS written, even on spawn failure.
-//   - Exit 0 only when codex exited 0 AND the final message is non-empty.
+//   - Wall-clock ceiling: the codex process tree is killed after --ceiling-min.
+//   - Stall detection: killed after --stall-min with no stdout/stderr output.
+//   - Signals (SIGINT/SIGTERM/SIGHUP/SIGBREAK) kill the codex tree and still
+//     write result.json, so cancelling the runner cannot orphan codex.
+//   - result.json is ALWAYS written once --out is known — including argument
+//     errors, spawn failures, stream errors, and signals.
+//   - Exit 0 only when codex exited 0 AND this run wrote a non-empty final
+//     message (a stale message from a previous run in the same --out cannot
+//     count: the file is removed before spawning).
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, createWriteStream, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, createWriteStream, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { locateCodex } from "./locate-codex.mjs";
 
-function fail(msg) {
-  process.stderr.write(`run-codex: ${msg}\n`);
-  process.exit(2);
-}
+const MAX_TIMER_MS = 2_147_483_647;
+const STREAM_FLUSH_GRACE_MS = 5_000;
+const POST_EXIT_CLOSE_GRACE_MS = 3_000;
 
 const argv = process.argv.slice(2);
 const sep = argv.indexOf("--");
-if (sep < 0) fail("missing `--` separator before codex args");
-const own = argv.slice(0, sep);
-const codexArgs = argv.slice(sep + 1);
+const own = sep < 0 ? argv : argv.slice(0, sep);
+const codexArgs = sep < 0 ? [] : argv.slice(sep + 1);
 
 function ownFlag(name, fallback) {
   const i = own.indexOf(name);
@@ -44,21 +47,7 @@ function ownFlag(name, fallback) {
 }
 
 const outDir = ownFlag("--out");
-const promptFile = ownFlag("--prompt-file");
-const ceilingMs = Number(ownFlag("--ceiling-min", "30")) * 60_000;
-const stallMs = Number(ownFlag("--stall-min", "10")) * 60_000;
-if (!outDir) fail("--out is required");
-if (!promptFile || !existsSync(promptFile)) fail("--prompt-file is required and must exist");
-if (codexArgs[0] !== "exec") fail("codex args must start with `exec`");
-if (codexArgs[codexArgs.length - 1] !== "-") fail("codex args must end with `-` (prompt via stdin)");
-
-mkdirSync(outDir, { recursive: true });
-const paths = {
-  events: join(outDir, "events.jsonl"),
-  stderr: join(outDir, "stderr.txt"),
-  lastMessage: join(outDir, "last-message.txt"),
-  result: join(outDir, "result.json"),
-};
+const startedAt = Date.now();
 
 const state = {
   ok: false,
@@ -69,41 +58,146 @@ const state = {
   durationMs: 0,
   lastMessage: null,
 };
-const startedAt = Date.now();
 
-function writeResult() {
-  state.durationMs = Date.now() - startedAt;
+let paths = null;
+if (outDir) {
   try {
-    state.lastMessage = existsSync(paths.lastMessage)
-      ? readFileSync(paths.lastMessage, "utf8").trim()
-      : null;
-  } catch {}
+    mkdirSync(outDir, { recursive: true });
+    paths = {
+      events: join(outDir, "events.jsonl"),
+      stderr: join(outDir, "stderr.txt"),
+      lastMessage: join(outDir, "last-message.txt"),
+      result: join(outDir, "result.json"),
+    };
+  } catch (err) {
+    process.stderr.write(`run-codex: cannot create --out dir: ${err?.message ?? err}\n`);
+  }
+}
+
+let resultWritten = false;
+let spawnedRun = false; // only a run that actually started can own a final message
+function writeResult() {
+  if (resultWritten) return;
+  resultWritten = true;
+  state.durationMs = Date.now() - startedAt;
+  if (paths && spawnedRun) {
+    try {
+      state.lastMessage = existsSync(paths.lastMessage)
+        ? readFileSync(paths.lastMessage, "utf8").trim() || null
+        : null;
+    } catch (err) {
+      state.reason ??= `cannot read final message file: ${err?.message ?? err}`;
+    }
+  }
   state.ok = state.exitCode === 0 && !state.killed && Boolean(state.lastMessage);
-  if (state.exitCode === 0 && !state.killed && !state.lastMessage) {
+  if (state.ok) {
+    // A benign advisory (e.g. codex closed stdin early) must not be reported as
+    // a failure once the run demonstrably produced a real answer.
+    state.reason = null;
+  } else if (!state.reason) {
     state.reason = "codex exited 0 but produced no final message";
   }
-  writeFileSync(paths.result, JSON.stringify(state, null, 2));
+  const json = JSON.stringify(state, null, 2);
+  if (paths) {
+    try {
+      writeFileSync(paths.result, json);
+    } catch (err) {
+      process.stderr.write(`run-codex: cannot write result.json: ${err?.message ?? err}\n`);
+    }
+  }
   process.stdout.write(`RESULT: ${JSON.stringify(state)}\n`);
+}
+
+// Argument/setup failure: still honour the result.json contract when possible.
+function fatal(msg) {
+  state.reason = msg;
+  state.exitCode = state.exitCode ?? null;
+  process.stderr.write(`run-codex: ${msg}\n`);
+  writeResult();
+  process.exit(2);
+}
+
+if (!outDir) fatal("--out is required");
+if (!paths) fatal("--out directory could not be created");
+if (sep < 0) fatal("missing `--` separator before codex args");
+
+function positiveMinutes(flag, fallback) {
+  const raw = ownFlag(flag, fallback);
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    fatal(`${flag} must be a positive number of minutes (got ${JSON.stringify(raw)})`);
+  }
+  const ms = minutes * 60_000;
+  if (ms > MAX_TIMER_MS) fatal(`${flag} exceeds the maximum supported timer (~35791 min)`);
+  return ms;
+}
+
+const ceilingMs = positiveMinutes("--ceiling-min", "30");
+const stallMs = positiveMinutes("--stall-min", "10");
+
+const promptFile = ownFlag("--prompt-file");
+if (!promptFile) fatal("--prompt-file is required");
+
+// Read the prompt BEFORE spawning: an unreadable prompt must never leave a
+// started codex process behind.
+let promptBuf;
+try {
+  promptBuf = readFileSync(promptFile);
+} catch (err) {
+  fatal(`cannot read --prompt-file: ${err?.message ?? err}`);
+}
+
+if (codexArgs[0] !== "exec") fatal("codex args must start with `exec`");
+if (codexArgs[codexArgs.length - 1] !== "-") fatal("codex args must end with `-` (prompt via stdin)");
+for (const banned of ["--json", "-o", "--output-last-message"]) {
+  if (codexArgs.includes(banned)) {
+    fatal(`codex args must not contain ${banned} — the runner supplies it`);
+  }
+}
+
+// A stale final message from a previous run in this directory must not be able
+// to make a failed run look successful.
+try {
+  rmSync(paths.lastMessage, { force: true });
+} catch (err) {
+  fatal(`cannot clear previous final message file: ${err?.message ?? err}`);
 }
 
 let exe;
 try {
   exe = locateCodex();
 } catch (err) {
-  state.reason = String(err?.message ?? err);
-  writeResult();
-  process.exit(2);
+  fatal(String(err?.message ?? err));
 }
 
-// Insert --json and -o right after the subcommand chain, before the `-` prompt.
 const fullArgs = [...codexArgs.slice(0, -1), "--json", "-o", paths.lastMessage, "-"];
 
-const child = spawn(exe, fullArgs, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-child.stdin.write(readFileSync(promptFile));
-child.stdin.end();
+// POSIX: detached gives the child its own process group so the whole tree can
+// be signalled via -pid. Not unref'd, so exit events still arrive. On Windows
+// detached would spawn a console window; taskkill /T handles the tree there.
+const isWin = process.platform === "win32";
+const child = spawn(exe, fullArgs, {
+  stdio: ["pipe", "pipe", "pipe"],
+  windowsHide: true,
+  detached: !isWin,
+});
+spawnedRun = true;
 
 const eventsOut = createWriteStream(paths.events);
 const stderrOut = createWriteStream(paths.stderr);
+for (const [name, stream] of [["events.jsonl", eventsOut], ["stderr.txt", stderrOut]]) {
+  stream.on("error", (err) => {
+    state.reason ??= `cannot write ${name}: ${err?.message ?? err}`;
+    treeKill(state.reason);
+  });
+}
+
+child.stdin.on("error", (err) => {
+  // EPIPE here means codex died before consuming the prompt; the exit handler
+  // reports the real cause, so only record it if nothing better is known.
+  state.reason ??= `failed to send prompt to codex: ${err?.message ?? err}`;
+});
+child.stdin.end(promptBuf);
 
 let lastActivity = Date.now();
 let lineBuf = "";
@@ -130,11 +224,26 @@ child.stderr.on("data", (d) => {
 function treeKill(reason) {
   if (state.killed || child.exitCode !== null) return;
   state.killed = true;
-  state.reason = reason;
-  if (process.platform === "win32") {
-    spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+  state.reason ??= reason;
+  if (isWin) {
+    const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+    killer.on("error", (err) => {
+      state.reason += ` (taskkill failed to start: ${err?.message ?? err}; codex tree may survive)`;
+      try { child.kill("SIGKILL"); } catch {}
+    });
+    killer.on("exit", (code) => {
+      // 128 = "process not found", i.e. it already exited; anything else is a
+      // real failure the caller must know about.
+      if (code !== 0 && code !== 128) {
+        state.reason += ` (taskkill exited ${code}; codex tree may survive)`;
+      }
+    });
   } else {
-    try { child.kill("SIGKILL"); } catch {}
+    try {
+      process.kill(-child.pid, "SIGKILL"); // whole process group
+    } catch {
+      try { child.kill("SIGKILL"); } catch {}
+    }
   }
 }
 
@@ -146,26 +255,51 @@ const stallTimer = setInterval(() => {
   if (Date.now() - lastActivity > stallMs) {
     treeKill(`no output for ${stallMs / 60000} min (stalled)`);
   }
-}, 30_000);
+}, Math.min(30_000, Math.max(1_000, Math.floor(stallMs / 4))));
 
-child.on("error", (err) => {
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+  try {
+    process.on(sig, () => {
+      treeKill(`runner received ${sig}; codex tree killed`);
+      // Give the kill a beat to land, then finalize regardless.
+      setTimeout(() => finalize(), 500).unref?.();
+    });
+  } catch {}
+}
+
+let finalizing = false;
+function finalize() {
+  if (finalizing) return;
+  finalizing = true;
   clearTimeout(ceilingTimer);
   clearInterval(stallTimer);
-  state.reason = `spawn failed: ${err?.message ?? err}`;
-  writeResult();
-  process.exit(2);
+
+  // Flush both log streams before exiting; a slow filesystem must not truncate
+  // events.jsonl or stderr.txt.
+  const flush = (stream) =>
+    new Promise((resolve) => {
+      if (stream.destroyed || stream.writableEnded) return resolve();
+      stream.end(resolve);
+      stream.on("error", resolve);
+    });
+  const guard = new Promise((resolve) => setTimeout(resolve, STREAM_FLUSH_GRACE_MS).unref?.());
+
+  Promise.race([Promise.all([flush(eventsOut), flush(stderrOut)]), guard]).then(() => {
+    writeResult();
+    process.exit(state.ok ? 0 : 1);
+  });
+}
+
+child.on("error", (err) => {
+  state.reason ??= `spawn failed: ${err?.message ?? err}`;
+  finalize();
 });
 
 child.on("exit", (code, signal) => {
-  clearTimeout(ceilingTimer);
-  clearInterval(stallTimer);
   state.exitCode = code;
   if (!state.reason && code !== 0) state.reason = `codex exited ${signal ?? code}`;
-  // Give the -o file write a moment to flush on some platforms.
-  setTimeout(() => {
-    eventsOut.end();
-    stderrOut.end();
-    writeResult();
-    process.exit(state.ok ? 0 : 1);
-  }, 200);
+  // Prefer `close` (all stdio drained); fall back if it never arrives.
+  setTimeout(finalize, POST_EXIT_CLOSE_GRACE_MS).unref?.();
 });
+
+child.on("close", () => finalize());

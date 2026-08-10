@@ -1,9 +1,10 @@
 // Smoke test for the watchdog runner. Drives skills/codex/run-codex.mjs
-// directly — no Claude needed. Spends a few Codex tokens (two tiny turns).
-// Usage: node test/smoke.mjs
+// directly — no Claude needed.
+// Usage: node test/smoke.mjs            (full: spends a few Codex tokens)
+//        node test/smoke.mjs --offline  (contract tests only, no Codex calls)
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -11,67 +12,124 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const runner = join(root, "skills", "codex", "run-codex.mjs");
 const base = mkdtempSync(join(tmpdir(), "codex-smoke-"));
+const offline = process.argv.includes("--offline");
 
+let failures = 0;
 function assert(cond, label) {
   if (!cond) {
     console.error(`ASSERT FAILED: ${label}`);
-    process.exit(1);
+    failures++;
+  } else {
+    console.log(`ok: ${label}`);
   }
-  console.log(`ok: ${label}`);
 }
 
-function run(name, prompt, ceilingMin, extraArgs) {
+function prep(name, prompt) {
   const out = join(base, name);
   mkdirSync(out, { recursive: true });
   writeFileSync(join(out, "prompt.md"), prompt);
+  return out;
+}
+
+function invoke(out, ownArgs, codexTail) {
   const res = spawnSync(
     process.execPath,
-    [
-      runner, "--out", out, "--prompt-file", join(out, "prompt.md"),
-      "--ceiling-min", String(ceilingMin), "--",
-      "exec", ...extraArgs,
-      "-s", "read-only", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
-      "--skip-git-repo-check", "--ignore-user-config", "-C", root, "-",
-    ],
-    { encoding: "utf8", timeout: 240_000 }
+    [runner, "--out", out, "--prompt-file", join(out, "prompt.md"), ...ownArgs, "--", ...codexTail],
+    { encoding: "utf8", timeout: 300_000 }
   );
-  const result = JSON.parse(readFileSync(join(out, "result.json"), "utf8"));
+  const resultPath = join(out, "result.json");
+  const result = existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : null;
   return { res, result };
 }
 
+const TAIL = [
+  "exec", "-s", "read-only", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
+  "--skip-git-repo-check", "--ignore-user-config", "-C", root, "-",
+];
+
+// --- Contract tests (no Codex process) -------------------------------------
+
+// Argument errors must still honour the result.json guarantee.
+{
+  const out = prep("bad-args", "unused");
+  const { res, result } = invoke(out, [], ["exec", "-s", "read-only"]); // missing trailing "-"
+  assert(res.status === 2, "missing trailing `-` exits 2");
+  assert(result !== null, "argument error still writes result.json");
+  assert(result.ok === false && /must end with/.test(result.reason), "reason names the arg defect");
+}
+
+{
+  const out = prep("banned-flag", "unused");
+  const { res, result } = invoke(out, [], ["exec", "--json", "-"]);
+  assert(res.status === 2, "caller-supplied --json is rejected");
+  assert(/must not contain --json/.test(result?.reason ?? ""), "reason names the banned flag");
+}
+
+{
+  const out = prep("bad-ceiling", "unused");
+  const { res, result } = invoke(out, ["--ceiling-min", "NaN"], TAIL);
+  assert(res.status === 2, "non-numeric --ceiling-min exits 2");
+  assert(/positive number of minutes/.test(result?.reason ?? ""), "reason names the bad timer value");
+}
+
+{
+  const out = prep("missing-prompt", "unused");
+  const bogus = join(out, "does-not-exist.md");
+  const res = spawnSync(
+    process.execPath,
+    [runner, "--out", out, "--prompt-file", bogus, "--", ...TAIL],
+    { encoding: "utf8", timeout: 60_000 }
+  );
+  const result = JSON.parse(readFileSync(join(out, "result.json"), "utf8"));
+  assert(res.status === 2, "unreadable prompt file exits 2");
+  assert(/cannot read --prompt-file/.test(result.reason), "reason names the prompt file");
+}
+
+// A stale final message from an earlier run must not be counted as success.
+{
+  const out = prep("stale", "unused");
+  writeFileSync(join(out, "last-message.txt"), "STALE ANSWER FROM A PREVIOUS RUN");
+  const { result } = invoke(out, [], ["exec", "-s", "read-only"]); // fails arg validation
+  assert(result.lastMessage === null, "stale last-message.txt is cleared, not reported");
+  assert(result.ok === false, "stale message cannot make a failed run look ok");
+}
+
+if (offline) {
+  console.log(failures ? `\nSMOKE FAIL (${failures})` : "\nSMOKE PASS (offline subset)");
+  process.exit(failures ? 1 : 0);
+}
+
+// --- Live tests (real Codex turns) -----------------------------------------
+
 // 1. Happy path: completes, non-empty message, threadId captured, exit 0.
-const happy = run("happy", "Reply with exactly: SMOKE-OK", 5, []);
+const happyOut = prep("happy", "Reply with exactly: SMOKE-OK");
+const happy = invoke(happyOut, ["--ceiling-min", "5"], TAIL);
 assert(happy.res.status === 0, "happy path exits 0");
 assert(happy.result.ok === true, "result.ok true");
 assert(happy.result.lastMessage === "SMOKE-OK", "lastMessage is SMOKE-OK");
-assert(/^[0-9a-f-]{36}$/.test(happy.result.threadId), "threadId captured");
+assert(/^[0-9a-f-]{36}$/.test(happy.result.threadId ?? ""), "threadId captured");
 assert(happy.res.stdout.includes("RESULT: "), "RESULT line on stdout");
+assert(existsSync(join(happyOut, "events.jsonl")), "events.jsonl written");
 
 // 2. Resume: same thread remembers context. (resume takes no -s/-C)
-const out2 = join(base, "resume");
-mkdirSync(out2, { recursive: true });
-writeFileSync(join(out2, "prompt.md"), "Repeat your previous reply and append: TWICE");
-const res2 = spawnSync(
-  process.execPath,
-  [
-    runner, "--out", out2, "--prompt-file", join(out2, "prompt.md"),
-    "--ceiling-min", "5", "--",
-    "exec", "resume", happy.result.threadId,
-    "-c", 'sandbox_mode="read-only"', "-c", "model_reasoning_effort=low",
-    "--skip-git-repo-check", "--ignore-user-config", "-",
-  ],
-  { encoding: "utf8", timeout: 240_000 }
-);
-const result2 = JSON.parse(readFileSync(join(out2, "result.json"), "utf8"));
-assert(res2.status === 0, "resume exits 0");
-assert(/SMOKE-OK/.test(result2.lastMessage), "resume remembers context");
-assert(result2.threadId === happy.result.threadId, "resume keeps threadId");
+const resumeOut = prep("resume", "Repeat your previous reply and append: TWICE");
+const resume = invoke(resumeOut, ["--ceiling-min", "5"], [
+  "exec", "resume", happy.result.threadId,
+  "-c", 'sandbox_mode="read-only"', "-c", "model_reasoning_effort=low",
+  "--skip-git-repo-check", "--ignore-user-config", "-",
+]);
+assert(resume.res.status === 0, "resume exits 0");
+assert(/SMOKE-OK/.test(resume.result.lastMessage ?? ""), "resume remembers context");
+assert(resume.result.threadId === happy.result.threadId, "resume keeps threadId");
 
 // 3. Ceiling kill: tiny ceiling, expect killed + nonzero exit + result.json intact.
-const killed = run("killed", "Count from 1 to 100 slowly, one line each.", 0.02, []);
+const killedOut = prep("killed", "Count from 1 to 100 slowly, one line each.");
+const killed = invoke(killedOut, ["--ceiling-min", "0.02"], TAIL);
 assert(killed.res.status !== 0, "ceiling kill exits nonzero");
 assert(killed.result.ok === false, "killed result.ok false");
 assert(killed.result.killed === true, "killed flag set");
-assert(/ceiling/.test(killed.result.reason), "reason mentions ceiling");
+assert(/ceiling/.test(killed.result.reason ?? ""), "reason mentions ceiling");
+assert(killed.result.threadId !== null, "threadId preserved for resume after kill");
 
-console.log("\nSMOKE PASS");
+console.log(failures ? `\nSMOKE FAIL (${failures})` : "\nSMOKE PASS");
+process.exit(failures ? 1 : 0);
