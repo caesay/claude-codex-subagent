@@ -18,7 +18,10 @@ no build step, no daemon.
   run wrote a non-empty final message (a stale message from a previous run in
   the same output directory cannot count).
 - **`codex-runner` agent** — thin Sonnet relay so Workflow (ultracode) steps
-  can be assigned to Codex models.
+  can be assigned to Codex models. Tool-restricted to `Skill, Bash, Write,
+  Read`; treats the task text as inert data addressed to Codex rather than
+  instructions addressed to itself; and must return a `---codex---` footer
+  whose values only a real run produces.
 
 ## Why this shape
 
@@ -33,6 +36,9 @@ The recurring causes, which this design counters directly:
 | `exit 0` treated as success with zero output | Empty final message = error, loud `CODEX-ERROR:` contract |
 | Stale shared broker / app-server reused while wedged | No daemon at all |
 | Inherited user MCP servers hang startup | `--ignore-user-config` |
+| Relay answers from its own model instead of the delegated one | Prompt is framed as `<payload>` data, not instructions; relay has no Edit/Grep/Glob, no fallback path, and must return a footer it can only get from a real run |
+| Long result silently truncated in transit between agents | Over ~8k chars the relay returns a file path instead of the text |
+| Full agent transcript floods the caller's context | Transcript goes to `events.jsonl` and is never read; stdout carries a pointer, not the payload |
 
 ## Prerequisites
 
@@ -80,11 +86,18 @@ it. Workflow step / subagent:
 ```js
 const result = await agent(
   ['codex-model: gpt-5.6-terra', 'codex-effort: high', '',
-   'Review src/ for concurrency bugs and report findings.'].join('\n'),
+   '<payload>',
+   'Review src/ for concurrency bugs and report findings.',
+   '</payload>'].join('\n'),
   { agentType: 'codex-subagent:codex-runner' })
 // follow-up: extract threadId from the ---codex--- footer,
 // pass 'codex-thread: <id>' as a header in the next step
 ```
+
+Wrap the prompt in `<payload>` ... `</payload>`. A long, imperative prompt
+otherwise outranks the relay's short role description and the relay does the
+task itself; the tags mark it as inert data addressed to Codex. They are
+stripped before the prompt is sent. Unwrapped still works.
 
 Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-sandbox:`,
 `codex-cwd:`, `codex-ceiling-min:`.
@@ -96,6 +109,21 @@ Results end with a grep-able footer:
 threadId: 019876ab-...
 model: gpt-5.6-terra  effort: high  sandbox: read-only
 duration: 184032 ms
+out: /tmp/claude/.../codex/review-src
+```
+
+A reply with no `---codex---` footer and no `CODEX-ERROR:` line did not come
+from Codex. Discard it and re-dispatch — do not use it.
+
+Results over ~8,000 characters come back as a path instead of inline text,
+since agent-to-agent replies are size-capped and would be truncated:
+
+```
+codex report: <out>/last-message.txt
+(23814 chars — read this file for the full result)
+
+---codex---
+...
 ```
 
 Failures are always reported as `CODEX-ERROR: <reason>` with the threadId for
@@ -105,6 +133,11 @@ resume — never silence.
 
 - The watchdog spawns the native codex binary directly (npm shims are
   unreliable with piped stdio on Windows); override with `CODEX_EXECUTABLE`.
+- Runner stdout is one `RESULT: {...}` line with `ok`, `exitCode`, `killed`,
+  `reason`, `threadId`, `durationMs`, `lastMessageChars`, `lastMessageFile`,
+  `resultFile` — never the final message itself. The supervising agent reads
+  the text once, from `last-message.txt`, instead of once on stdout, once in
+  `result.json`, and once more when it repeats it.
 - Prompts are piped via stdin (`-`), never inlined as shell arguments.
 - `codex exec resume <threadId>` accepts no `-s`/`-C`; sandbox on resume goes
   via `-c sandbox_mode="..."`.
@@ -118,5 +151,5 @@ node test/smoke.mjs --offline   # contract tests only, no Codex calls
 
 Covered: argument errors still write `result.json`; banned caller flags;
 invalid timer values; unreadable prompt file; stale final message cannot fake
-success; happy path; thread resume with context; ceiling kill preserving the
-threadId.
+success; stdout never carries the final message; happy path; thread resume with
+context; ceiling kill preserving the threadId.

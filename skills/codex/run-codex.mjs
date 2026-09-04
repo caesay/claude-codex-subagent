@@ -10,6 +10,11 @@
 //   last-message.txt  final agent message (-o)
 //   result.json       {ok, exitCode, killed, reason, threadId, durationMs, lastMessage}
 //
+// stdout carries one `RESULT: {...}` line with those fields EXCEPT lastMessage,
+// plus lastMessageChars/lastMessageFile/resultFile pointers. The final message
+// is deliberately kept off stdout so a supervising agent reads it exactly once,
+// from last-message.txt, instead of once per copy.
+//
 // The prompt is delivered via stdin (codex arg `-`), so arbitrary content needs
 // no shell quoting. The codex args after `--` must NOT include --json, -o, or a
 // prompt — the runner appends those. Example arg tails:
@@ -105,7 +110,15 @@ function writeResult() {
       process.stderr.write(`run-codex: cannot write result.json: ${err?.message ?? err}\n`);
     }
   }
-  process.stdout.write(`RESULT: ${JSON.stringify(state)}\n`);
+  // stdout is read by a supervising agent, so it must never carry the payload:
+  // the final message would otherwise land in that context here, again in
+  // result.json, and a third time in the agent's own report. Only the pointer
+  // goes out; the text is read once, from last-message.txt.
+  const { lastMessage, ...summary } = state;
+  summary.lastMessageChars = lastMessage ? lastMessage.length : 0;
+  summary.lastMessageFile = paths ? paths.lastMessage : null;
+  summary.resultFile = paths ? paths.result : null;
+  process.stdout.write(`RESULT: ${JSON.stringify(summary)}\n`);
 }
 
 // Argument/setup failure: still honour the result.json contract when possible.

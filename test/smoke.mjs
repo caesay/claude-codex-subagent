@@ -94,6 +94,21 @@ const TAIL = [
   assert(result.ok === false, "stale message cannot make a failed run look ok");
 }
 
+// stdout must never carry the payload — the supervising agent reads it once,
+// from last-message.txt, not once per copy.
+{
+  const out = prep("quiet-stdout", "unused");
+  const { res } = invoke(out, [], ["exec", "-s", "read-only"]); // fails arg validation
+  const line = res.stdout.split("\n").find((l) => l.startsWith("RESULT: "));
+  assert(Boolean(line), "RESULT line on stdout even for an argument error");
+  const summary = JSON.parse(line.slice("RESULT: ".length));
+  assert(!("lastMessage" in summary), "stdout RESULT carries no lastMessage");
+  assert(summary.lastMessageChars === 0, "lastMessageChars reported");
+  assert(typeof summary.lastMessageFile === "string", "lastMessageFile pointer reported");
+  assert(typeof summary.resultFile === "string", "resultFile pointer reported");
+  assert("threadId" in summary && "durationMs" in summary, "stdout keeps the non-payload fields");
+}
+
 if (offline) {
   console.log(failures ? `\nSMOKE FAIL (${failures})` : "\nSMOKE PASS (offline subset)");
   process.exit(failures ? 1 : 0);
