@@ -10,7 +10,7 @@
       "name": "codex-subagent",
       "displayName": "Codex Subagent",
       "source": "./",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Run OpenAI Codex (GPT models) as a subagent via the codex CLI, with a watchdog that enforces timeouts and guarantees a result is always reported.",
       "author": {
         "name": "Caelan Sayler",
