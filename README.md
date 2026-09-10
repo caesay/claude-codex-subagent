@@ -1,4 +1,4 @@
-# codex-subagent
+# codexcs
 
 Claude Code plugin that runs OpenAI Codex (GPT models) as a subagent via the
 `codex exec` CLI, supervised by a small watchdog runner. Zero dependencies,
@@ -6,7 +6,7 @@ no build step, no daemon.
 
 ## What you get
 
-- **`codex` skill** — the full procedure for launching a Codex agent from any
+- **`codexcs:codex-agent` skill** — the full procedure for launching a Codex agent from any
   context (main conversation, subagent, workflow step): model/effort/sandbox
   selection, thread resume, hang-proof waiting, and a mandatory report-back
   contract.
@@ -53,7 +53,7 @@ The recurring causes, which this design counters directly:
 
 ```
 /plugin marketplace add caesay/claude-codex-subagent
-/plugin install codex-subagent@caesay
+/plugin install codexcs@caesay
 ```
 
 Then restart Claude Code so the skill and agent load.
@@ -61,7 +61,7 @@ Then restart Claude Code so the skill and agent load.
 Non-interactively:
 
 ```
-claude plugin install codex-subagent@caesay --scope user
+claude plugin install codexcs@caesay --scope user
 ```
 
 Or enable it per project in `.claude/settings.json`:
@@ -71,7 +71,7 @@ Or enable it per project in `.claude/settings.json`:
   "extraKnownMarketplaces": {
     "caesay": { "source": { "source": "github", "repo": "caesay/claude-codex-subagent" } }
   },
-  "enabledPlugins": { "codex-subagent@caesay": true }
+  "enabledPlugins": { "codexcs@caesay": true }
 }
 ```
 
@@ -83,7 +83,7 @@ claude --plugin-dir /path/to/claude-codex-subagent
 
 ## Use
 
-Direct (main conversation): invoke the `codex-subagent:codex` skill and follow
+Direct (main conversation): invoke the `codexcs:codex-agent` skill and follow
 it. Workflow step / subagent:
 
 ```js
@@ -92,7 +92,7 @@ const result = await agent(
    '<payload>',
    'Review src/ for concurrency bugs and report findings.',
    '</payload>'].join('\n'),
-  { agentType: 'codex-subagent:codex-runner' })
+  { agentType: 'codexcs:codex-runner' })
 // follow-up: extract threadId from the ---codex--- footer,
 // pass 'codex-thread: <id>' as a header in the next step
 ```

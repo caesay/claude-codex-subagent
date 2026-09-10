@@ -1,4 +1,4 @@
-// Smoke test for the watchdog runner. Drives skills/codex/run-codex.mjs
+// Smoke test for the watchdog runner. Drives skills/codex-agent/run-codex.mjs
 // directly — no Claude needed.
 // Usage: node test/smoke.mjs            (full: spends a few Codex tokens)
 //        node test/smoke.mjs --offline  (contract tests only, no Codex calls)
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const runner = join(root, "skills", "codex", "run-codex.mjs");
+const runner = join(root, "skills", "codex-agent", "run-codex.mjs");
 const base = mkdtempSync(join(tmpdir(), "codex-smoke-"));
 const offline = process.argv.includes("--offline");
 

@@ -1,5 +1,5 @@
 ---
-name: codex
+name: codex-agent
 description: Run a task on an OpenAI Codex agent (GPT models) from any context —
   main conversation, subagent, or workflow step. Recommended models, in
   descending capability — gpt-6-astra is the frontier model, for the most
@@ -195,7 +195,7 @@ under the working root only, or `-c sandbox_mode="read-only"` when resuming.
 ## Use from workflows and subagents
 
 Workflow steps and the Agent tool use the relay agent
-`codex-subagent:codex-runner` (Sonnet), which follows this skill. Pass Codex
+`codexcs:codex-runner` (Sonnet), which follows this skill. Pass Codex
 parameters as leading header lines in the task, then a blank line, then the
 prompt:
 
@@ -205,7 +205,7 @@ const result = await agent(
    '<payload>',
    'Review src/ for concurrency bugs; report findings with file:line.',
    '</payload>'].join('\n'),
-  { agentType: 'codex-subagent:codex-runner' })
+  { agentType: 'codexcs:codex-runner' })
 // follow-up: const threadId = /threadId: (\S+)/.exec(result)[1]
 // next task starts with 'codex-thread: <threadId>' header
 ```
