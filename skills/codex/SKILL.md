@@ -1,11 +1,19 @@
 ---
 name: codex
-description: Run a task on an OpenAI Codex agent (GPT models such as
-  gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna) from any context — main
-  conversation, subagent, or workflow step. Covers launching, waiting without
-  hanging, resuming threads, the <payload> ... </payload> prompt-wrapping
-  contract for dispatching to the codex-runner relay, and the mandatory
-  report-back contract.
+description: Run a task on an OpenAI Codex agent (GPT models) from any context —
+  main conversation, subagent, or workflow step. Recommended models, in
+  descending capability — gpt-6-astra is the frontier model, for the most
+  complex tasks needing the highest intelligence; gpt-5.6-sol is the workhorse
+  and the default choice, high capability, smart, quick and cost-effective;
+  gpt-5.6-terra is mid-tier and balanced, for document analysis, text
+  generation, code exploration and other low-stakes work; gpt-5.6-luna is
+  small, fast and cheap, to be avoided for coding but suited to routine
+  high-frequency automation such as high-volume classification or locating
+  something in a large codebase, with the understanding of what was found
+  deferred to a higher tier. Covers
+  launching, waiting without hanging, resuming threads, the <payload> ...
+  </payload> prompt-wrapping contract for dispatching to the codex-runner
+  relay, and the mandatory report-back contract.
 ---
 
 # Running a Codex agent
@@ -27,28 +35,50 @@ what the final message must contain. If the prompt arrived wrapped in
 `<payload>` ... `</payload>`, strip those tags and write the rest byte for
 byte. Concurrent Codex calls are fine as long as each has its own `<out>`.
 
+**Codex runs unsandboxed — say what it may touch.** See *Sandboxing* below.
+Nothing stops Codex writing outside the paths you had in mind, so the prompt is
+the only boundary that exists. Name the directories it should change, and say
+plainly when something is off limits ("read `../other-repo` but do not modify
+it", "do not push", "do not touch anything outside `src/`"). You do not need to
+grant permissions — it already has all of them — you need to withhold them.
+
+The runner prepends a short `<runtime>` block telling Codex there is no sandbox
+and where its scratch directory is, so you never have to. It writes what Codex
+actually received to `<out>/prompt-sent.md`.
+
 ### 2. Launch
 
 New thread:
 
 ```
-node <skill-dir>/run-codex.mjs --out <out> --prompt-file <out>/prompt.md --ceiling-min 30 -- exec -s workspace-write -m gpt-5.6-sol -c model_reasoning_effort=medium --skip-git-repo-check --ignore-user-config -C <cwd> -
+node <skill-dir>/run-codex.mjs --out <out> --prompt-file <out>/prompt.md --ceiling-min 30 -- exec -m gpt-5.6-sol -c model_reasoning_effort=medium --skip-git-repo-check --ignore-user-config -C <cwd> -
 ```
 
-Resume an existing thread (`resume` accepts NO `-s` or `-C` — sandbox must be
-passed as a config override):
+Resume an existing thread (`resume` accepts no `-C`):
 
 ```
-node <skill-dir>/run-codex.mjs --out <out> --prompt-file <out>/prompt.md --ceiling-min 30 -- exec resume <threadId> -c sandbox_mode="workspace-write" -c model_reasoning_effort=medium --skip-git-repo-check --ignore-user-config -
+node <skill-dir>/run-codex.mjs --out <out> --prompt-file <out>/prompt.md --ceiling-min 30 -- exec resume <threadId> -c model_reasoning_effort=medium --skip-git-repo-check --ignore-user-config -
 ```
 
 Knobs:
-- model: `-m gpt-5.6-sol` (default frontier) | `gpt-5.6-terra` | `gpt-5.6-luna`
-  (fast/cheap) | `gpt-5.5`. Omit `-m` for the user's default.
+- model: `-m <model>`, or omit `-m` for the user's default. Pick by what the
+  task actually needs — this is the main cost/quality lever you control:
+
+  | Model | Use it for |
+  |---|---|
+  | `gpt-6-astra` | Frontier. The most complex tasks, where the highest intelligence is what the job requires. |
+  | `gpt-5.6-sol` | Workhorse, and the default. High capability, smart, quick, cost-effective. Reach here unless you have a reason not to. |
+  | `gpt-5.6-terra` | Mid-tier, balanced. Document analysis, text generation, code exploration, other low-stakes work. |
+  | `gpt-5.6-luna` | Small, fast, cheap. **Avoid for coding.** Routine high-frequency automation — high-volume classification, or finding where something lives in a large codebase, with the understanding of what was found deferred to a higher tier. |
+
 - effort: `-c model_reasoning_effort=low|medium|high|xhigh|max` (ultra exists
   on sol/terra).
-- sandbox: `read-only` | `workspace-write` | `danger-full-access` (only when
-  explicitly requested).
+- sandbox: none, by default — see *Sandboxing* below. Pass `-s read-only` (or
+  `-s workspace-write`, or `-c sandbox_mode="read-only"` on resume) to opt back
+  in for a run you want confined.
+- scratch: `--scratch <dir>` — defaults to `<out>/scratch`, created by the
+  runner and named to Codex in the preamble. Pin it to a stable path when
+  resuming a thread that left a harness behind.
 - ceiling: `--ceiling-min` — set to a generous bound for the effort level
   (30 for medium, 60 for xhigh+). Stall kill defaults to 10 min of silence
   (`--stall-min`).
@@ -135,6 +165,32 @@ Hard rules, each one a known failure mode of naive integrations:
   Windows use `taskkill /PID <pid> /T`, not `Stop-Process -Force`, so the
   runner can clean up). It kills the codex tree and still writes
   `result.json`. Report the interruption + threadId.
+
+## Sandboxing
+
+The runner appends `--dangerously-bypass-approvals-and-sandbox` unless the
+caller states a sandbox of its own, so by default Codex has full filesystem and
+network access and never pauses for approval.
+
+This is deliberate. A sandbox denial does not reach Codex as "you may not do
+that" — it arrives mid-run as a command that failed, which it then tries to work
+around, and the usual result is a burnt ceiling and a partial answer rather than
+a clean refusal. Approval prompts are worse: nothing is there to answer them, so
+the run sits until the stall timer kills it.
+
+The cost is that **the prompt is now the only boundary**. Write it that way:
+
+- Name the directories Codex should change, not just the task.
+- State the exclusions you actually care about — don't modify this dependency,
+  don't push, don't touch anything outside this subtree, don't install
+  globally. Absent a sentence, there is no restriction.
+- Point mess at the scratch directory rather than forbidding it in the abstract;
+  the preamble already offers one.
+
+To confine a specific run, pass a sandbox yourself and the bypass is suppressed:
+`-s read-only` for review and analysis work, `-s workspace-write` to allow edits
+under the working root only, or `-c sandbox_mode="read-only"` when resuming.
+`-s` is rejected by `codex exec resume`; the config override is not.
 
 ## Use from workflows and subagents
 

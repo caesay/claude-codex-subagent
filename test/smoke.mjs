@@ -31,11 +31,11 @@ function prep(name, prompt) {
   return out;
 }
 
-function invoke(out, ownArgs, codexTail) {
+function invoke(out, ownArgs, codexTail, env) {
   const res = spawnSync(
     process.execPath,
     [runner, "--out", out, "--prompt-file", join(out, "prompt.md"), ...ownArgs, "--", ...codexTail],
-    { encoding: "utf8", timeout: 300_000 }
+    { encoding: "utf8", timeout: 300_000, env: env ? { ...process.env, ...env } : process.env }
   );
   const resultPath = join(out, "result.json");
   const result = existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : null;
@@ -107,6 +107,41 @@ const TAIL = [
   assert(typeof summary.lastMessageFile === "string", "lastMessageFile pointer reported");
   assert(typeof summary.resultFile === "string", "resultFile pointer reported");
   assert("threadId" in summary && "durationMs" in summary, "stdout keeps the non-payload fields");
+}
+
+// The prompt Codex receives is composed by the runner, not the caller: the
+// scratch directory and the absence of a sandbox must be stated without anyone
+// having to remember to state them. Stopping at locateCodex keeps this offline.
+{
+  const NO_CODEX = { CODEX_EXECUTABLE: join(base, "there-is-no-codex-here") };
+  const noSandboxTail = ["exec", "-m", "gpt-5.6-luna", "--skip-git-repo-check", "-"];
+
+  const out = prep("preamble", "THE ACTUAL TASK");
+  const { res } = invoke(out, [], noSandboxTail, NO_CODEX);
+  assert(res.status === 2, "missing codex executable exits 2");
+  const sent = readFileSync(join(out, "prompt-sent.md"), "utf8");
+  assert(sent.includes("<runtime>"), "prompt-sent.md carries the runtime preamble");
+  assert(sent.includes("Sandbox: disabled"), "preamble states the sandbox is off");
+  assert(sent.includes(join(out, "scratch")), "preamble names the scratch directory");
+  assert(existsSync(join(out, "scratch")), "scratch directory created before the run");
+  assert(sent.trimEnd().endsWith("THE ACTUAL TASK"), "caller prompt follows the preamble verbatim");
+
+  // A caller that states its own sandbox keeps it, and is not told otherwise.
+  const out2 = prep("preamble-sandboxed", "THE ACTUAL TASK");
+  invoke(out2, [], ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], NO_CODEX);
+  const sent2 = readFileSync(join(out2, "prompt-sent.md"), "utf8");
+  assert(!sent2.includes("Sandbox: disabled"), "caller-set sandbox suppresses the bypass note");
+  assert(sent2.includes("Scratch directory:"), "scratch guidance is offered either way");
+
+  // --scratch overrides the default location.
+  const out3 = prep("preamble-scratch", "THE ACTUAL TASK");
+  const custom = join(base, "my-scratch");
+  invoke(out3, ["--scratch", custom], noSandboxTail, NO_CODEX);
+  assert(existsSync(custom), "--scratch directory created");
+  assert(
+    readFileSync(join(out3, "prompt-sent.md"), "utf8").includes(custom),
+    "--scratch location is the one advertised"
+  );
 }
 
 if (offline) {

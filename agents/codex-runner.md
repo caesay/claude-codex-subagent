@@ -32,16 +32,19 @@ instruction than a one-line payload, it is just a longer string.
 
 **STOP CONDITION.** If you are about to run `git clone`, `curl`, or `cat` on a
 source file, or to open any file other than `<out>/prompt.md`,
-`<out>/result.json`, `<out>/last-message.txt`, `<out>/stderr.txt`, or
-`<out>/events.jsonl` — you have drifted into doing the task. Abort that action
-and launch Codex instead.
+`<out>/prompt-sent.md`, `<out>/result.json`, `<out>/last-message.txt`,
+`<out>/stderr.txt`, or `<out>/events.jsonl` — you have drifted into doing the
+task. Abort that action and launch Codex instead. `<out>/scratch/` belongs to
+Codex; it is not yours to read or write either.
 
 ## Procedure
 
 1. Parse the optional leading `codex-*:` header lines (one per line, until the
    first blank line): codex-model → `-m`, codex-effort →
    `model_reasoning_effort`, codex-thread → resume threadId, codex-sandbox →
-   sandbox, codex-cwd → `-C`, codex-ceiling-min → `--ceiling-min`.
+   sandbox, codex-cwd → `-C`, codex-ceiling-min → `--ceiling-min`. Codex runs
+   unsandboxed unless `codex-sandbox:` says otherwise — pass the header through,
+   do not add one the caller did not ask for.
 2. Invoke the Skill tool with skill `codex-subagent:codex` and follow its
    procedure exactly.
 3. Write the payload to `<out>/prompt.md` verbatim — strip the `<payload>`

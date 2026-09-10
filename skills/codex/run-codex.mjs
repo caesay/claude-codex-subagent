@@ -2,12 +2,14 @@
 // Watchdog runner for one `codex exec` call. No daemon, dies with the call.
 //
 // Usage:
-//   node run-codex.mjs --out <dir> --prompt-file <file> [--ceiling-min 30] [--stall-min 10] -- <codex exec args...>
+//   node run-codex.mjs --out <dir> --prompt-file <file> [--ceiling-min 30] [--stall-min 10] [--scratch <dir>] -- <codex exec args...>
 //
 // The runner owns all output paths under --out:
 //   events.jsonl      JSONL event stream (--json)
 //   stderr.txt        codex stderr
 //   last-message.txt  final agent message (-o)
+//   prompt-sent.md    the prompt as codex received it, preamble included
+//   scratch/          working space offered to codex (override with --scratch)
 //   result.json       {ok, exitCode, killed, reason, threadId, durationMs, lastMessage}
 //
 // stdout carries one `RESULT: {...}` line with those fields EXCEPT lastMessage,
@@ -20,6 +22,11 @@
 // prompt — the runner appends those. Example arg tails:
 //   exec -s read-only -m gpt-5.6-luna -c model_reasoning_effort=low --skip-git-repo-check -C <cwd> -
 //   exec resume <threadId> -c sandbox_mode="read-only" -
+//
+// Codex runs unsandboxed unless the caller states a sandbox of its own: the
+// runner appends --dangerously-bypass-approvals-and-sandbox. Passing -s,
+// --sandbox or -c sandbox_mode=... suppresses that. The prompt is prefixed with
+// a <runtime> block naming the scratch directory and the absence of a sandbox.
 //
 // Guarantees (the reasons this script exists):
 //   - Wall-clock ceiling: the codex process tree is killed after --ceiling-min.
@@ -73,6 +80,7 @@ if (outDir) {
       stderr: join(outDir, "stderr.txt"),
       lastMessage: join(outDir, "last-message.txt"),
       result: join(outDir, "result.json"),
+      promptSent: join(outDir, "prompt-sent.md"),
     };
   } catch (err) {
     process.stderr.write(`run-codex: cannot create --out dir: ${err?.message ?? err}\n`);
@@ -168,6 +176,64 @@ for (const banned of ["--json", "-o", "--output-last-message"]) {
   }
 }
 
+// Codex runs unsandboxed by default here. In day-to-day use a sandbox denial
+// does not arrive as a clear "not allowed" — it surfaces mid-run as a failed
+// command that the agent then tries to work around, burning turns and often
+// ending in a partial answer. The same flag also skips approval prompts, which
+// would otherwise stall a non-interactive run until the stall timer kills it.
+// Any sandbox intent stated by the caller wins over this default.
+const BYPASS = "--dangerously-bypass-approvals-and-sandbox";
+const callerSetSandbox =
+  codexArgs.includes(BYPASS) ||
+  codexArgs.includes("-s") ||
+  codexArgs.includes("--sandbox") ||
+  codexArgs.some((a) => a.startsWith("--sandbox=") || a.startsWith("sandbox_mode="));
+const sandboxArgs = callerSetSandbox ? [] : [BYPASS];
+
+// Named in the prompt preamble below, and created here, so that no caller has
+// to remember to offer one. Without a stated scratch location Codex writes test
+// harnesses, throwaway clones and build output into the tree it was asked to
+// reason about.
+const scratchDir = ownFlag("--scratch", join(outDir, "scratch"));
+try {
+  mkdirSync(scratchDir, { recursive: true });
+} catch (err) {
+  fatal(`cannot create scratch directory: ${err?.message ?? err}`);
+}
+
+// Prepended to every prompt so the two facts Codex most often has to discover
+// the hard way — that nothing is blocked, and where to put mess — are stated up
+// front. Written to prompt-sent.md as well, so "what did Codex actually see" is
+// answerable after the fact.
+const preamble = [
+  "<runtime>",
+  ...(sandboxArgs.length
+    ? [
+        "Sandbox: disabled. You have full filesystem and network access and no",
+        "command requires approval. Nothing will be blocked, so do not design",
+        "around restrictions that are not there, and do not stop to ask for",
+        "permission. The corollary: the task below is the only thing scoping",
+        "what you should touch. Stay inside it.",
+        "",
+      ]
+    : []),
+  `Scratch directory: ${scratchDir}`,
+  "It exists already. Put throwaway artifacts there — temporary files, test",
+  "harnesses, fresh clones, build output, downloaded data — rather than in the",
+  "working tree you were asked to reason about or the system temp directory.",
+  "</runtime>",
+  "",
+  "Everything below this line is the task.",
+  "",
+  "",
+].join("\n");
+const sentBuf = Buffer.concat([Buffer.from(preamble, "utf8"), promptBuf]);
+try {
+  writeFileSync(paths.promptSent, sentBuf);
+} catch (err) {
+  fatal(`cannot write prompt-sent.md: ${err?.message ?? err}`);
+}
+
 // A stale final message from a previous run in this directory must not be able
 // to make a failed run look successful.
 try {
@@ -183,7 +249,7 @@ try {
   fatal(String(err?.message ?? err));
 }
 
-const fullArgs = [...codexArgs.slice(0, -1), "--json", "-o", paths.lastMessage, "-"];
+const fullArgs = [...codexArgs.slice(0, -1), ...sandboxArgs, "--json", "-o", paths.lastMessage, "-"];
 
 // POSIX: detached gives the child its own process group so the whole tree can
 // be signalled via -pid. Not unref'd, so exit events still arrive. On Windows
@@ -210,7 +276,7 @@ child.stdin.on("error", (err) => {
   // reports the real cause, so only record it if nothing better is known.
   state.reason ??= `failed to send prompt to codex: ${err?.message ?? err}`;
 });
-child.stdin.end(promptBuf);
+child.stdin.end(sentBuf);
 
 let lastActivity = Date.now();
 let lineBuf = "";
