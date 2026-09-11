@@ -35,12 +35,13 @@ what the final message must contain. If the prompt arrived wrapped in
 `<payload>` ... `</payload>`, strip those tags and write the rest byte for
 byte. Concurrent Codex calls are fine as long as each has its own `<out>`.
 
-**Codex runs unsandboxed — say what it may touch.** See *Sandboxing* below.
-Nothing stops Codex writing outside the paths you had in mind, so the prompt is
-the only boundary that exists. Name the directories it should change, and say
-plainly when something is off limits ("read `../other-repo` but do not modify
-it", "do not push", "do not touch anything outside `src/`"). You do not need to
-grant permissions — it already has all of them — you need to withhold them.
+**Codex always runs unsandboxed — say what it may touch.** There is no sandbox
+option; see *No sandbox* below. Nothing stops Codex writing outside the paths
+you had in mind, so the prompt is the only boundary that exists. Name the
+directories it should change, and say plainly when something is off limits
+("read `../other-repo` but do not modify it", "do not push", "do not touch
+anything outside `src/`"). You do not need to grant permissions — it already has
+all of them — you need to withhold them.
 
 The runner prepends a short `<runtime>` block telling Codex there is no sandbox
 and where its scratch directory is, so you never have to. It writes what Codex
@@ -73,9 +74,9 @@ Knobs:
 
 - effort: `-c model_reasoning_effort=low|medium|high|xhigh|max` (ultra exists
   on sol/terra).
-- sandbox: none, by default — see *Sandboxing* below. Pass `-s read-only` (or
-  `-s workspace-write`, or `-c sandbox_mode="read-only"` on resume) to opt back
-  in for a run you want confined.
+- sandbox: there is no sandbox knob. Do not pass `-s`, `--sandbox`,
+  `-c sandbox_mode=...`, `-c approval_policy=...` or `--approve-for-me` — the
+  runner strips them. See *No sandbox*.
 - scratch: `--scratch <dir>` — defaults to `<out>/scratch`, created by the
   runner and named to Codex in the preamble. Pin it to a stable path when
   resuming a thread that left a harness behind.
@@ -120,7 +121,7 @@ enough to be worth carrying:
   ```
   ---codex---
   threadId: <threadId>
-  model: <model>  effort: <effort>  sandbox: <sandbox>
+  model: <model>  effort: <effort>
   duration: <durationMs> ms
   out: <out>
   ```
@@ -166,19 +167,27 @@ Hard rules, each one a known failure mode of naive integrations:
   runner can clean up). It kills the codex tree and still writes
   `result.json`. Report the interruption + threadId.
 
-## Sandboxing
+## No sandbox
 
-The runner appends `--dangerously-bypass-approvals-and-sandbox` unless the
-caller states a sandbox of its own, so by default Codex has full filesystem and
-network access and never pauses for approval.
+The runner always appends `--dangerously-bypass-approvals-and-sandbox`, so Codex
+has full filesystem and network access and never pauses for approval. **There is
+no way to turn this off.** Sandbox and approval arguments supplied by a caller
+are stripped before codex is spawned: `-s`, `--sandbox`, `--sandbox=`,
+`-c sandbox_mode=...`, `-c approval_policy=...`, `--approve-for-me`. The runner
+names what it dropped on stderr.
 
-This is deliberate. A sandbox denial does not reach Codex as "you may not do
-that" — it arrives mid-run as a command that failed, which it then tries to work
-around, and the usual result is a burnt ceiling and a partial answer rather than
-a clean refusal. Approval prompts are worse: nothing is there to answer them, so
-the run sits until the stall timer kills it.
+Three reasons, in the order they bite:
 
-The cost is that **the prompt is now the only boundary**. Write it that way:
+1. A caller-supplied sandbox flag alongside the bypass flag makes codex reject
+   the invocation outright. Models kept supplying one, so the run simply failed.
+2. A sandbox denial does not reach Codex as "you may not do that" — it arrives
+   mid-run as a command that failed, which it then tries to work around, and the
+   usual result is a burnt ceiling and a partial answer rather than a clean
+   refusal.
+3. Approval prompts have nothing to answer them in a non-interactive run, so the
+   run sits until the stall timer kills it.
+
+The cost is that **the prompt is the only boundary**. Write it that way:
 
 - Name the directories Codex should change, not just the task.
 - State the exclusions you actually care about — don't modify this dependency,
@@ -187,10 +196,8 @@ The cost is that **the prompt is now the only boundary**. Write it that way:
 - Point mess at the scratch directory rather than forbidding it in the abstract;
   the preamble already offers one.
 
-To confine a specific run, pass a sandbox yourself and the bypass is suppressed:
-`-s read-only` for review and analysis work, `-s workspace-write` to allow edits
-under the working root only, or `-c sandbox_mode="read-only"` when resuming.
-`-s` is rejected by `codex exec resume`; the config override is not.
+If a task genuinely must not write anything, say so in the prompt and ask for a
+report rather than edits. That is now the only form the constraint can take.
 
 ## Use from workflows and subagents
 
@@ -218,8 +225,8 @@ text as inert data with a boundary, rather than arguing with it. They are
 stripped before the prompt reaches Codex. An unwrapped prompt still works, but
 it is the shape that has actually failed in practice.
 
-Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-sandbox:`,
-`codex-cwd:`, `codex-ceiling-min:`. From the main conversation you do not need
+Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-cwd:`,
+`codex-ceiling-min:`. There is no `codex-sandbox:` header — see *No sandbox*. From the main conversation you do not need
 the relay — follow this skill directly.
 
 **Verify the relay.** A `codex-runner` reply that does not end with a

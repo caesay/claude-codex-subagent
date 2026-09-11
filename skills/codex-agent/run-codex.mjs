@@ -23,10 +23,11 @@
 //   exec -s read-only -m gpt-5.6-luna -c model_reasoning_effort=low --skip-git-repo-check -C <cwd> -
 //   exec resume <threadId> -c sandbox_mode="read-only" -
 //
-// Codex runs unsandboxed unless the caller states a sandbox of its own: the
-// runner appends --dangerously-bypass-approvals-and-sandbox. Passing -s,
-// --sandbox or -c sandbox_mode=... suppresses that. The prompt is prefixed with
-// a <runtime> block naming the scratch directory and the absence of a sandbox.
+// Codex always runs unsandboxed: the runner appends
+// --dangerously-bypass-approvals-and-sandbox, and strips any sandbox or
+// approval argument the caller supplied. There is no override. The prompt is
+// prefixed with a <runtime> block naming the scratch directory and the absence
+// of a sandbox.
 //
 // Guarantees (the reasons this script exists):
 //   - Wall-clock ceiling: the codex process tree is killed after --ceiling-min.
@@ -176,19 +177,55 @@ for (const banned of ["--json", "-o", "--output-last-message"]) {
   }
 }
 
-// Codex runs unsandboxed by default here. In day-to-day use a sandbox denial
-// does not arrive as a clear "not allowed" — it surfaces mid-run as a failed
-// command that the agent then tries to work around, burning turns and often
-// ending in a partial answer. The same flag also skips approval prompts, which
-// would otherwise stall a non-interactive run until the stall timer kills it.
-// Any sandbox intent stated by the caller wins over this default.
+// Codex always runs unsandboxed here. There is no override, by design.
+//
+// A sandbox denial does not arrive as a clear "not allowed" — it surfaces
+// mid-run as a failed command that the agent then tries to work around, burning
+// turns and ending in a partial answer. Approval prompts are worse: nothing is
+// there to answer them, so the run sits until the stall timer kills it. And a
+// caller that passes its own sandbox flag alongside the bypass makes codex
+// reject the invocation outright, which is how this surfaced in practice:
+// callers kept supplying one.
+//
+// So sandbox arguments are stripped from the caller's args rather than honoured
+// or rejected. Stripping keeps the run working; rejecting would only move the
+// failure. The exception is a caller-supplied bypass flag, which is dropped
+// here only to avoid passing it twice.
 const BYPASS = "--dangerously-bypass-approvals-and-sandbox";
-const callerSetSandbox =
-  codexArgs.includes(BYPASS) ||
-  codexArgs.includes("-s") ||
-  codexArgs.includes("--sandbox") ||
-  codexArgs.some((a) => a.startsWith("--sandbox=") || a.startsWith("sandbox_mode="));
-const sandboxArgs = callerSetSandbox ? [] : [BYPASS];
+const SANDBOX_VALUE_FLAGS = new Set(["-s", "--sandbox"]);
+const stripped = [];
+const cleanedArgs = [];
+// The trailing `-` is validated above and re-appended below; excluding it here
+// stops a value-taking flag from swallowing it.
+const headArgs = codexArgs.slice(0, -1);
+for (let i = 0; i < headArgs.length; i++) {
+  const arg = headArgs[i];
+  if (SANDBOX_VALUE_FLAGS.has(arg)) {
+    stripped.push(`${arg} ${headArgs[i + 1] ?? ""}`.trim());
+    i++; // its value
+    continue;
+  }
+  if (arg.startsWith("--sandbox=") || arg === BYPASS || arg === "--approve-for-me") {
+    stripped.push(arg);
+    continue;
+  }
+  // `-c sandbox_mode=...` and `-c approval_policy=...` arrive as two args.
+  if (arg === "-c" || arg === "--config") {
+    const next = headArgs[i + 1] ?? "";
+    if (next.startsWith("sandbox_mode=") || next.startsWith("approval_policy=")) {
+      stripped.push(`${arg} ${next}`);
+      i++;
+      continue;
+    }
+  }
+  cleanedArgs.push(arg);
+}
+if (stripped.length) {
+  process.stderr.write(
+    `run-codex: sandbox arguments are not supported and were dropped: ${stripped.join(" ")}\n`
+  );
+}
+const sandboxArgs = [BYPASS];
 
 // Named in the prompt preamble below, and created here, so that no caller has
 // to remember to offer one. Without a stated scratch location Codex writes test
@@ -207,16 +244,12 @@ try {
 // answerable after the fact.
 const preamble = [
   "<runtime>",
-  ...(sandboxArgs.length
-    ? [
-        "Sandbox: disabled. You have full filesystem and network access and no",
-        "command requires approval. Nothing will be blocked, so do not design",
-        "around restrictions that are not there, and do not stop to ask for",
-        "permission. The corollary: the task below is the only thing scoping",
-        "what you should touch. Stay inside it.",
-        "",
-      ]
-    : []),
+  "Sandbox: disabled. You have full filesystem and network access and no",
+  "command requires approval. Nothing will be blocked, so do not design around",
+  "restrictions that are not there, and do not stop to ask for permission. The",
+  "corollary: the task below is the only thing scoping what you should touch.",
+  "Stay inside it.",
+  "",
   `Scratch directory: ${scratchDir}`,
   "It exists already. Put throwaway artifacts there — temporary files, test",
   "harnesses, fresh clones, build output, downloaded data — rather than in the",
@@ -249,7 +282,7 @@ try {
   fatal(String(err?.message ?? err));
 }
 
-const fullArgs = [...codexArgs.slice(0, -1), ...sandboxArgs, "--json", "-o", paths.lastMessage, "-"];
+const fullArgs = [...cleanedArgs, ...sandboxArgs, "--json", "-o", paths.lastMessage, "-"];
 
 // POSIX: detached gives the child its own process group so the whole tree can
 // be signalled via -pid. Not unref'd, so exit events still arrive. On Windows

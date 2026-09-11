@@ -43,7 +43,7 @@ function invoke(out, ownArgs, codexTail, env) {
 }
 
 const TAIL = [
-  "exec", "-s", "read-only", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
+  "exec", "-m", "gpt-5.6-luna", "-c", "model_reasoning_effort=low",
   "--skip-git-repo-check", "--ignore-user-config", "-C", root, "-",
 ];
 
@@ -52,7 +52,7 @@ const TAIL = [
 // Argument errors must still honour the result.json guarantee.
 {
   const out = prep("bad-args", "unused");
-  const { res, result } = invoke(out, [], ["exec", "-s", "read-only"]); // missing trailing "-"
+  const { res, result } = invoke(out, [], ["exec", "--skip-git-repo-check"]); // missing trailing "-"
   assert(res.status === 2, "missing trailing `-` exits 2");
   assert(result !== null, "argument error still writes result.json");
   assert(result.ok === false && /must end with/.test(result.reason), "reason names the arg defect");
@@ -89,7 +89,7 @@ const TAIL = [
 {
   const out = prep("stale", "unused");
   writeFileSync(join(out, "last-message.txt"), "STALE ANSWER FROM A PREVIOUS RUN");
-  const { result } = invoke(out, [], ["exec", "-s", "read-only"]); // fails arg validation
+  const { result } = invoke(out, [], ["exec", "--skip-git-repo-check"]); // fails arg validation
   assert(result.lastMessage === null, "stale last-message.txt is cleared, not reported");
   assert(result.ok === false, "stale message cannot make a failed run look ok");
 }
@@ -98,7 +98,7 @@ const TAIL = [
 // from last-message.txt, not once per copy.
 {
   const out = prep("quiet-stdout", "unused");
-  const { res } = invoke(out, [], ["exec", "-s", "read-only"]); // fails arg validation
+  const { res } = invoke(out, [], ["exec", "--skip-git-repo-check"]); // fails arg validation
   const line = res.stdout.split("\n").find((l) => l.startsWith("RESULT: "));
   assert(Boolean(line), "RESULT line on stdout even for an argument error");
   const summary = JSON.parse(line.slice("RESULT: ".length));
@@ -126,12 +126,20 @@ const TAIL = [
   assert(existsSync(join(out, "scratch")), "scratch directory created before the run");
   assert(sent.trimEnd().endsWith("THE ACTUAL TASK"), "caller prompt follows the preamble verbatim");
 
-  // A caller that states its own sandbox keeps it, and is not told otherwise.
+  // A caller that supplies a sandbox does not get one. Passing it through
+  // alongside the bypass flag is what makes codex reject the invocation.
   const out2 = prep("preamble-sandboxed", "THE ACTUAL TASK");
-  invoke(out2, [], ["exec", "-s", "read-only", "--skip-git-repo-check", "-"], NO_CODEX);
+  const { res: res2 } = invoke(
+    out2,
+    [],
+    ["exec", "-s", "read-only", "-c", "sandbox_mode=read-only", "--approve-for-me", "--skip-git-repo-check", "-"],
+    NO_CODEX
+  );
   const sent2 = readFileSync(join(out2, "prompt-sent.md"), "utf8");
-  assert(!sent2.includes("Sandbox: disabled"), "caller-set sandbox suppresses the bypass note");
-  assert(sent2.includes("Scratch directory:"), "scratch guidance is offered either way");
+  assert(sent2.includes("Sandbox: disabled"), "caller-supplied sandbox cannot re-enable one");
+  assert(/dropped: .*-s read-only/.test(res2.stderr), "dropped sandbox args are named on stderr");
+  assert(/sandbox_mode=read-only/.test(res2.stderr), "config-form sandbox is dropped too");
+  assert(/--approve-for-me/.test(res2.stderr), "approval routing is dropped too");
 
   // --scratch overrides the default location.
   const out3 = prep("preamble-scratch", "THE ACTUAL TASK");
@@ -161,11 +169,11 @@ assert(/^[0-9a-f-]{36}$/.test(happy.result.threadId ?? ""), "threadId captured")
 assert(happy.res.stdout.includes("RESULT: "), "RESULT line on stdout");
 assert(existsSync(join(happyOut, "events.jsonl")), "events.jsonl written");
 
-// 2. Resume: same thread remembers context. (resume takes no -s/-C)
+// 2. Resume: same thread remembers context. (resume takes no -C)
 const resumeOut = prep("resume", "Repeat your previous reply and append: TWICE");
 const resume = invoke(resumeOut, ["--ceiling-min", "5"], [
   "exec", "resume", happy.result.threadId,
-  "-c", 'sandbox_mode="read-only"', "-c", "model_reasoning_effort=low",
+  "-c", "model_reasoning_effort=low",
   "--skip-git-repo-check", "--ignore-user-config", "-",
 ]);
 assert(resume.res.status === 0, "resume exits 0");

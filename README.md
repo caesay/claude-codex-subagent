@@ -7,7 +7,7 @@ no build step, no daemon.
 ## What you get
 
 - **`codexcs:codex-agent` skill** — the full procedure for launching a Codex agent from any
-  context (main conversation, subagent, workflow step): model/effort/sandbox
+  context (main conversation, subagent, workflow step): model and effort
   selection, thread resume, hang-proof waiting, and a mandatory report-back
   contract.
 - **`run-codex.mjs` watchdog** — one short-lived process per call. Enforces a
@@ -17,7 +17,7 @@ no build step, no daemon.
   stream errors, and SIGINT/SIGTERM. Exit 0 only when Codex exited 0 AND this
   run wrote a non-empty final message (a stale message from a previous run in
   the same output directory cannot count). It also composes the prompt Codex
-  receives — see *Sandboxing* — and records it as `prompt-sent.md`.
+  receives — see *No sandbox* — and records it as `prompt-sent.md`.
 - **`codex-runner` agent** — thin Sonnet relay so Workflow (ultracode) steps
   can be assigned to Codex models. Tool-restricted to `Skill, Bash, Write,
   Read`; treats the task text as inert data addressed to Codex rather than
@@ -39,7 +39,7 @@ The recurring causes, which this design counters directly:
 | Inherited user MCP servers hang startup | `--ignore-user-config` |
 | Relay answers from its own model instead of the delegated one | Prompt is framed as `<payload>` data, not instructions; relay has no Edit/Grep/Glob, no fallback path, and must return a footer it can only get from a real run |
 | Long result silently truncated in transit between agents | Over ~8k chars the relay returns a file path instead of the text |
-| Sandbox denials surface mid-run as failed commands the agent works around; approval prompts stall a run nobody is watching | Unsandboxed by default, with the boundary moved into the prompt |
+| Sandbox denials surface mid-run as failed commands the agent works around; approval prompts stall a run nobody is watching; a caller-set sandbox alongside the bypass makes codex reject the invocation | Always unsandboxed, caller sandbox arguments stripped, boundary moved into the prompt |
 | Codex scatters harnesses, clones and build output through the working tree | Runner creates a scratch dir and names it in every prompt |
 | Full agent transcript floods the caller's context | Transcript goes to `events.jsonl` and is never read; stdout carries a pointer, not the payload |
 
@@ -102,8 +102,8 @@ otherwise outranks the relay's short role description and the relay does the
 task itself; the tags mark it as inert data addressed to Codex. They are
 stripped before the prompt is sent. Unwrapped still works.
 
-Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-sandbox:`,
-`codex-cwd:`, `codex-ceiling-min:`.
+Headers: `codex-model:`, `codex-effort:`, `codex-thread:`, `codex-cwd:`,
+`codex-ceiling-min:`. There is no sandbox header — see *No sandbox*.
 
 Models worth routing between:
 
@@ -119,7 +119,7 @@ Results end with a grep-able footer:
 ```
 ---codex---
 threadId: 019876ab-...
-model: gpt-5.6-terra  effort: high  sandbox: read-only
+model: gpt-5.6-terra  effort: high
 duration: 184032 ms
 out: /tmp/claude/.../codex/review-src
 ```
@@ -141,29 +141,31 @@ codex report: <out>/last-message.txt
 Failures are always reported as `CODEX-ERROR: <reason>` with the threadId for
 resume — never silence.
 
-## Sandboxing
+## No sandbox
 
-**Codex runs unsandboxed by default.** The runner appends
-`--dangerously-bypass-approvals-and-sandbox` unless the caller states a sandbox
-of its own, so Codex has full filesystem and network access and never pauses for
-approval.
+**Codex always runs unsandboxed, and this cannot be turned off.** The runner
+appends `--dangerously-bypass-approvals-and-sandbox`, and strips any sandbox or
+approval argument a caller supplied — `-s`, `--sandbox`, `--sandbox=`,
+`-c sandbox_mode=...`, `-c approval_policy=...`, `--approve-for-me` — naming
+what it dropped on stderr. Codex has full filesystem and network access and
+never pauses for approval.
 
-A sandbox denial doesn't reach Codex as "you may not do that" — it arrives
-mid-run as a command that failed, which it then works around, and the usual
-outcome is a burnt ceiling and a partial answer rather than a clean refusal.
-Approval prompts are worse: nothing is there to answer them, so the run sits
-until the stall timer kills it. Both failure modes look like the plugin being
-broken.
+Three reasons, in the order they bite:
 
-The trade is that the prompt becomes the only boundary. The skill instructs
-callers to name the directories Codex may change and to state exclusions
-explicitly — nothing is withheld unless a sentence withholds it. To confine a
-run, pass a sandbox and the bypass is suppressed:
+1. A caller-supplied sandbox flag alongside the bypass flag makes codex reject
+   the invocation outright. Calling models kept supplying one, so runs failed
+   before they started. Stripping keeps the run working; rejecting would only
+   move the failure.
+2. A sandbox denial doesn't reach Codex as "you may not do that" — it arrives
+   mid-run as a command that failed, which it then works around, and the usual
+   outcome is a burnt ceiling and a partial answer rather than a clean refusal.
+3. Approval prompts have nothing to answer them in a non-interactive run, so it
+   sits until the stall timer kills it.
 
-```
-... -- exec -s read-only -m gpt-5.6-sol ... -            # review work
-... -- exec resume <id> -c sandbox_mode="read-only" ... -  # resume takes no -s
-```
+The trade is that the prompt is the only boundary. The skill instructs callers
+to name the directories Codex may change and to state exclusions explicitly —
+nothing is withheld unless a sentence withholds it. A task that must not write
+anything is expressed by asking for a report instead of edits.
 
 Every prompt is prefixed with a short `<runtime>` block stating that there is no
 sandbox and naming a scratch directory (`<out>/scratch`, or `--scratch <dir>`),
@@ -181,9 +183,8 @@ records exactly what Codex received.
   the text once, from `last-message.txt`, instead of once on stdout, once in
   `result.json`, and once more when it repeats it.
 - Prompts are piped via stdin (`-`), never inlined as shell arguments, and are
-  prefixed with the `<runtime>` preamble described under *Sandboxing*.
-- `codex exec resume <threadId>` accepts no `-s`/`-C`; sandbox on resume goes
-  via `-c sandbox_mode="..."`.
+  prefixed with the `<runtime>` preamble described under *No sandbox*.
+- `codex exec resume <threadId>` accepts no `-C`.
 
 ## Test
 
@@ -195,5 +196,6 @@ node test/smoke.mjs --offline   # contract tests only, no Codex calls
 Covered: argument errors still write `result.json`; banned caller flags;
 invalid timer values; unreadable prompt file; stale final message cannot fake
 success; stdout never carries the final message; the runtime preamble, scratch
-directory and `--scratch` override; caller-set sandbox suppressing the bypass;
-happy path; thread resume with context; ceiling kill preserving the threadId.
+directory and `--scratch` override; caller-supplied sandbox and approval
+arguments being stripped; happy path; thread resume with context; ceiling kill
+preserving the threadId.
